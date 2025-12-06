@@ -3,8 +3,8 @@ app.py – Peer registry + optional encrypted file relay (hybrid mode).
 
 Role:
 - /health       : simple health check
-- /register     : register peer_code -> ip:port
-- /resolve      : resolve peer_code -> ip:port
+- /register     : register peer_code -> ip:port (+ optional public_key_pem)
+- /resolve      : resolve peer_code -> ip:port (+ optional public_key_pem)
 - /upload       : store encrypted file + encrypted AES key, return token
 - /download/<t> : allow recipient to download encrypted file + encrypted key
 
@@ -25,9 +25,19 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------------------------------------------------
-# Registry: peer_code -> ip:port
+# Registry: peer_code -> ip:port (+ optional public_key_pem)
 # ---------------------------------------------------------------------
 
+# peer_registry structure:
+# {
+#   "123318148": {
+#       "ip": "1.2.3.4",
+#       "port": 5050,
+#       "last_seen": 1733400000.0,
+#       "public_key_pem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+#   },
+#   ...
+# }
 peer_registry = {}
 
 # ---------------------------------------------------------------------
@@ -69,11 +79,23 @@ def health():
 
 @app.route("/register", methods=["POST"])
 def register():
+    """
+    Register a peer in the registry.
+
+    Expected JSON:
+    {
+        "peer_code": "<digits-only>",
+        "ip": "<ip>",
+        "port": <int>,
+        "public_key_pem": "-----BEGIN PUBLIC KEY-----..."   # optional
+    }
+    """
     data = request.get_json(silent=True) or {}
 
     peer_code = data.get("peer_code")
     ip = data.get("ip")
     port = data.get("port")
+    public_key_pem = data.get("public_key_pem")  # may be None
 
     if not peer_code or not ip or port is None:
         print(f"[REGISTER] Invalid registration attempt: {data}")
@@ -89,21 +111,45 @@ def register():
         "ip": ip,
         "port": port,
         "last_seen": time.time(),
+        "public_key_pem": public_key_pem,
     }
 
-    print(f"[REGISTER] {peer_code} -> {ip}:{port}")
+    print(
+        f"[REGISTER] {peer_code} -> {ip}:{port} "
+        f"(public key present={bool(public_key_pem)})"
+    )
     return jsonify({"status": "ok"}), 200
 
 
 @app.route("/resolve/<peer_code>", methods=["GET"])
 def resolve(peer_code):
+    """
+    Resolve a peer code to connection info.
+
+    Returns JSON:
+    {
+        "ip": "...",
+        "port": 5050,
+        "public_key_pem": "-----BEGIN PUBLIC KEY-----..."   # or null
+    }
+    """
     entry = peer_registry.get(peer_code)
     if not entry:
         print(f"[RESOLVE] Peer code not found: {peer_code}")
         return jsonify({"error": "Not found"}), 404
 
-    print(f"[RESOLVE] {peer_code} -> {entry['ip']}:{entry['port']}")
-    return jsonify({"ip": entry["ip"], "port": entry["port"]}), 200
+    print(
+        f"[RESOLVE] {peer_code} -> {entry['ip']}:{entry['port']} "
+        f"(public key present={bool(entry.get('public_key_pem'))})"
+    )
+
+    return jsonify(
+        {
+            "ip": entry["ip"],
+            "port": entry["port"],
+            "public_key_pem": entry.get("public_key_pem"),
+        }
+    ), 200
 
 
 # ---------------------------------------------------------------------
@@ -197,8 +243,7 @@ def download(token):
 
     print(f"[DOWNLOAD] Serving token={token}, file={file_path}")
 
-    # Optional: one-time download – delete after serving
-    # Remove from memory mapping
+    # Remove from memory mapping (one-time download behaviour)
     uploads.pop(token, None)
 
     # Use send_file to stream response and attach encrypted key in header
